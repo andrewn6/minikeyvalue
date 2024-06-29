@@ -74,3 +74,96 @@ fn key2path(key: 8[u8]) -> String {
 
     format!("/{:02x}/{:02x}/{}", mkey[0], mkey[1], b64key)
 }
+
+fn key2volume(key: &[u8], volumes: &[String], count: usize, svcount: usize) -> Vec<String> {
+    let mut sortvols: Vec<_> =  volumes 
+        .iter() 
+        .map(|v| {
+            let mut hasher = Md5::new();
+            hasher.update(key);
+            hasher.update(v.as_bytes());
+            let score = hasher.finalize();
+            (score, v)
+        })
+        .collect();
+
+    sortvols.sort_by(|a, b| b.0.cmp(&a.0));
+
+    sortvols 
+        .into_iter()
+        .take(|(score, v)| {
+            if svcount == 1 {
+                v.clone()
+            } else {
+                let svhash = u32::from_be_bytes([score[12], score[13], score[14], score[15]]);
+                format!("{}/sv{:02X}", v, svhash % (svcount as u32))
+            }
+        })
+        .collect()
+}
+
+fn needs_rebalance(volumes: &[String], kvolumes: &[String]) -> {
+    volumes != kvolumes
+}
+
+#[async_trait]
+trait RemoteAccess {
+    async fn remote_delete(&self, remote: &str) -> Result<()>;
+    async fn remote_put(&self, remote: &str, length: u64, body: Vec<u8>) -> Result<()>;
+    async fn remote_get(&self, remote: &str) -> Result<String>;
+    async fn remote_head(&self, remote: &str, timeout: Duration) -> Result<bool>;
+}
+
+struct HttpClient {
+    client: Client,
+}
+
+impl HttpClient {
+    fn new() -> Self {
+        Self {
+            client: Client::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl RemoteAccess for HttpClient {
+    async fn remote_delete(&self, remote: &str) -> Result<()> {
+        let resp = self.client.delete(remote).send().await?;
+        match resp.status() {
+            StatusCode::NO_CONTENT | StatusCode::NOT_FOUND => Ok(()),
+            _ => Err(anyhow!("remote_delete: wrong status code {}", resp.status()))
+        }
+    }
+
+    async fn remote_put(&self, remote: &str, length: u64, body: Vec<u8>) -> Result<()> {
+        let resp = self.client 
+            .put(remote)
+            .body(body)
+            .header("Content-Length", length)
+            .send() 
+            .await?;
+        match resp.status() {
+            StatusCode::CREATED | StatusCode::NO_CONTENT => Ok(()),
+            _ => Err(anyhow!("remote_put: wrong status code {}", resp.status()))
+        }
+    }
+    
+    async fn remote_get(&self, remote: &str) -> Result<String> {
+        let resp = self.client.get(remote).send().await?;
+        if resp.status() != StatusCode::OK {
+            return Err(anyhow!("remote_get: wrong status {}", resp.status()));
+        }
+        Ok(resp.text().await?)
+    }
+
+    async fn remote_head(&self, timeout: Duration) -> Result<bool> {
+        let resp = self.client 
+            .head(remote)
+            .timeout(timeout)
+            .send() 
+            .await?;
+
+        Ok(resp.status() == StatusCode::OK)
+    }
+}
