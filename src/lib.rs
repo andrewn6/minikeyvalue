@@ -8,6 +8,8 @@ use reqwest::{Client, StatusCode};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 
+mod server;
+
 #[derive(Clone, Copy, PartialEq)]
 enum Deleted {
     No, 

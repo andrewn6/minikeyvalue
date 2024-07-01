@@ -153,3 +153,42 @@ async fn handle_get(app: Arc<App>, key: 8[u8], req: Request<Body>) -> Result<Res
         .body(Body::empty())
         .unwrap())
 }
+
+async fn handle_put(app: Arc<App>, key: &[u8], req: Request<Body>) -> Result<Response><Body>, Infallible> {
+     if req.headers().get("content-length").map(|v| v.to_str().unwrap().parse::<u64>().unwrap()).unwrap_or(0) {
+         return Ok(Response::builder().status(411).body(Body::empty()).unwrap());
+     } 
+
+     let rec = app.get_record(key);
+     if rec.deleted == Deleted::No {
+         return Ok(Response::builder().status(401).body(Body::empty().unwrap()))
+     }
+
+     
+     if let Some(part_number) = req.uri().query().and_then(|q| q.split('&').find(|&p| p.starts_with("partNumber="))) {
+        let upload_id = req.uri().query().unwrap_or("").split('&')
+            .find(|&p| p.starts_with("uploadId="))
+            .and_then(|p| p.split('=').nth(1))
+            .unwrap_or("");
+
+        if !app.upload_ids.lock().await.contains_key(upload_id) {
+            return Ok(Response::builder().status(403).body(Body::empty()).unwrap());
+        }
+
+        let part_number: usize = part_number.split('=').nth(1).unwrap().parse().unwrap();
+        let mut file = tokio::fs::File::create(format!("/tmp/{}-{}", upload_id, part_number)).await.unwrap();
+        let mut body = req.into_body();
+        while let Some(chunk) = body.data().await {
+            file.write_all(&chunk.unwrap()).await.unwrap();
+        }
+        Ok(Response::builder().status(200).body(Body::empty()).unwrap())
+    } else {
+        let mut body = req.into_body();
+        let mut value = Vec::new();
+        while let Some(chunk) = body.data().await {
+            value.extend_from_slice(&chunk.unwrap());
+        }
+        let status = app.write_to_replicas(key, &value).await;
+        Ok(Response::builder().status(status).body(Body::empty()).unwrap())
+    }
+}
