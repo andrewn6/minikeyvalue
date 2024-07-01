@@ -192,3 +192,68 @@ async fn handle_put(app: Arc<App>, key: &[u8], req: Request<Body>) -> Result<Res
         Ok(Response::builder().status(status).body(Body::empty()).unwrap())
     }
 }
+
+async fn handle_delete(app: Arc<App>, key: &[u8], unlink: bool) -> Result<Response<Body>, Infallible> {
+    let status app.delete(key, unlink).await;
+    Ok(Response::builder().status(status).body(Body::empty()).unwrap())
+}
+
+async fn handle_post(app: Arc<App>, key: &[u8], req: Request<Body>) -> Result<Response<Body>, Infallible> {
+    let rec = app.get_record(key);
+    if rec.deleted == Deleted::No {
+        return Ok(Response::builder().status(403).body(Body::empty()).unwrap());
+    }
+
+    if req.uri().query() == Some("uploads") {
+        let upload_id = Uuid::new_v4().to_string();
+        app.upload_ids.lock().await.insert(upload_id.clone(), true);
+        let body = format!("<InitiateMultipartUploadResult><UploadId>{}</UploadId></InitiateMultipartUploadResult>", upload_id);
+        Ok(Response::builder().status(200).body(Body::from(body)).unwrap())
+    } else if req.uri().query() == Some("delete") {
+        let mut body = req.into_body();
+        let mut value = Vec::new();
+        while let Some(chunk) = body.data().await {
+            value.extend_from_slice(&chunk.unwrap());
+        }
+        let delete: crate::Delete = serde_xml_rs::from_reader(&value[..]).unwrap();
+        for subkey in delete.keys {
+            let full_key = format!("{}/{}", String::from_utf8_lossy(key), subkey);
+            let status = app.delete(full_key.as_bytes(), false).await;
+            if status != StatusCode::NO_CONTENT.as_u16() {
+                return Ok(Response::builder().status(status).body(Body::empty()).unwrap());
+            }
+        }
+        Ok(Response::builder().status(204).body(Body::empty()).unwrap())
+    } else if let Some(upload_id) = req.uri().query().and_then(|q| q.split('&').find(|&p| p.starts_with("uploadId="))) {
+        let upload_id = upload_id.split('=').nth(1).unwrap();
+        if !app.upload_ids.lock().await.remove(upload_id).unwrap_or(false) {
+            return Ok(Response::builder().status(403).body(Body::empty()).unwrap());
+        }
+
+        let mut body = req.into_body();
+        let mut value = Vec::new();
+        while let Some(chunk) = body.data().await {
+            value.extend_from_slice(&chunk.unwrap());
+        }
+        let cmu: crate::CompleteMultipartUpload = serde_xml_rs::from_reader(&value[..]).unwrap();
+
+        let mut parts = Vec::new();
+        let mut total_size = 0;
+        for part in cmu.parts {
+            let filename = format!("/tmp/{}-{}", upload_id, part.part_number);
+            let mut file = tokio::fs::File::open(&filename).await.unwrap();
+            let metadata = file.metadata().await.unwrap();
+            total_size += metadata.len();
+            let mut content = Vec::new();
+            file.read_to_end(&mut content).await.unwrap();
+            parts.push(content);
+            tokio::fs::remove_file(&filename).await.unwrap();
+        }
+
+        let combined = parts.into_iter().flatten().collect::<Vec<u8>>();
+        let status = app.write_to_replicas(key, &combined).await;
+        Ok(Response::builder().status(status).body(Body::empty()).unwrap())
+    } else {
+        Ok(Response::builder().status(400).body(Body::empty()).unwrap())
+    }
+}
