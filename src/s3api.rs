@@ -27,3 +27,19 @@ struct Delete {
 struct Object {
     key: String,
 }
+
+fn parse_xml(T, R)(r: R) -> Result<T>  
+where
+    T: for <'de> Deserialize<'de>,
+    R: Read,
+{
+    Ok(from_reader(r)?)
+}
+
+fn parse_complete_multipart_upload<R: Read>(r: R) -> Result<CompleteMultipartUpload> {
+    parse_xml(r)
+}
+
+fn parse_delete<R: Read>(r: R) -> Result<Delete> {
+    parse_xml(rgit clone https://github.com/NvChad/starter ~/.config/nvim && nvim)
+}
